@@ -1,0 +1,65 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "thread_pool_size": 8,
+    "max_connections": 4096,
+    "connection_timeout_ms": 60000,
+    "max_upload_bytes": 2147483648
+  },
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "transcode",
+    "password": "transcode123",
+    "database": "transcode",
+    "pool_size": 8
+  },
+  "redis": {
+    "host": "127.0.0.1",
+    "port": 6379,
+    "password": "",
+    "db": 0,
+    "pool_size": 8,
+    "token_ttl_seconds": 7200,
+    "rate_limit_window_seconds": 60,
+    "rate_limit_max_requests": 100,
+    "lock_ttl_ms": 30000
+  },
+  "rabbitmq": {
+    "host": "127.0.0.1",
+    "port": 5672,
+    "user": "guest",
+    "password": "guest",
+    "vhost": "/",
+    "exchange": "transcode.exchange",
+    "queue": "transcode_task_queue",
+    "routing_key": "transcode.task",
+    "dead_letter_exchange": "transcode.dlx",
+    "dead_letter_queue": "transcode_dead_letter_queue",
+    "prefetch_count": 1
+  },
+  "minio": {
+    "endpoint": "http://127.0.0.1:9000",
+    "region": "us-east-1",
+    "access_key": "minioadmin",
+    "secret_key": "minioadmin",
+    "source_bucket": "source-videos",
+    "output_bucket": "output-videos",
+    "thumbnail_bucket": "output-videos"
+  },
+  "elasticsearch": {
+    "hosts": ["http://127.0.0.1:9200"],
+    "index": "video_meta"
+  },
+  "worker": {
+    "max_retry": 3,
+    "ffmpeg_path": "ffmpeg",
+    "concurrency": 4,
+    "default_bitrate": 1500000
+  },
+  "metrics": {
+    "port": 9100,
+    "bind": "0.0.0.0"
+  }
+}

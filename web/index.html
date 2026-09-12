@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>分布式多媒体异步转码服务</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel2: #273449;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent2: #818cf8;
+      --ok: #34d399;
+      --err: #f87171;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header {
+      padding: 22px 28px;
+      background: linear-gradient(135deg, #0ea5e9, #6366f1);
+      color: white;
+    }
+    header h1 { margin: 0; font-size: 24px; }
+    header p { margin: 6px 0 0; opacity: .9; font-size: 14px; }
+    main {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 18px;
+      padding: 22px 28px 40px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+    }
+    .card h2 { margin: 0 0 14px; font-size: 17px; }
+    label { display: block; margin: 10px 0 6px; color: var(--muted); font-size: 13px; }
+    input, select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0b1220;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+    button {
+      margin-top: 14px;
+      width: 100%;
+      padding: 11px 14px;
+      border: 0;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #06121f;
+      font-weight: 700;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button.secondary { background: var(--accent2); color: white; }
+    button:hover { filter: brightness(1.08); }
+    .row { display: flex; gap: 10px; }
+    .row button { flex: 1; }
+    .token, .result {
+      margin-top: 12px;
+      padding: 10px;
+      background: #0b1220;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: var(--muted);
+    }
+    .progress {
+      height: 12px;
+      margin-top: 12px;
+      background: #0b1220;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress > div {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #38bdf8, #818cf8);
+      transition: width .4s ease;
+    }
+    .token { color: var(--ok); }
+    a { color: var(--accent); word-break: break-all; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>分布式多媒体异步转码处理服务</h1>
+    <p>C++17 · epoll Reactor · RabbitMQ · MinIO · MySQL · Redis · FFmpeg</p>
+  </header>
+  <main>
+    <section class="card">
+      <h2>账号登录 / 注册</h2>
+      <label>用户名</label>
+      <input id="username" placeholder="例如 alice" autocomplete="username">
+      <label>密码</label>
+      <input id="password" type="password" placeholder="例如 123456" autocomplete="current-password">
+      <div class="row">
+        <button class="secondary" onclick="register()">注册</button>
+        <button onclick="login()">登录</button>
+      </div>
+      <div id="tokenBox" class="token"></div>
+    </section>
+
+    <section class="card">
+      <h2>提交转码任务</h2>
+      <label>视频文件</label>
+      <input id="file" type="file" accept="video/*">
+      <label>目标分辨率</label>
+      <select id="resolution">
+        <option value="320x240">320x240</option>
+        <option value="640x360">640x360</option>
+        <option value="1280x720" selected>1280x720</option>
+        <option value="1920x1080">1920x1080</option>
+      </select>
+      <label>目标码率 bps（低于 100000 会自动使用默认 1500000）</label>
+      <input id="bitrate" value="1500000" placeholder="例如 1500000">
+      <label>视频名称</label>
+      <input id="videoName" value="my_video" placeholder="例如 my_first_video">
+      <label>标签</label>
+      <input id="tag" value="默认" placeholder="例如 travel">
+      <button onclick="submitTask()">提交转码任务</button>
+      <div id="submitResult" class="result"></div>
+    </section>
+
+    <section class="card">
+      <h2>查询任务状态</h2>
+      <label>任务 ID</label>
+      <input id="queryTaskId" placeholder="提交任务后自动填入">
+      <button onclick="queryTask()">查询状态</button>
+      <div class="progress"><div id="progressBar"></div></div>
+      <div id="queryResult" class="result"></div>
+    </section>
+
+    <section class="card">
+      <h2>获取下载链接</h2>
+      <label>任务 ID</label>
+      <input id="presignTaskId" placeholder="请输入已成功的任务 ID">
+      <button onclick="getPresign()">获取预签名 URL</button>
+      <div id="presignResult" class="result"></div>
+    </section>
+
+    <section class="card">
+      <h2>全文检索</h2>
+      <label>关键词</label>
+      <input id="searchQuery" placeholder="例如 travel">
+      <button onclick="search()">搜索</button>
+      <div id="searchResult" class="result"></div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function setToken(token) {
+      localStorage.setItem('token', token);
+      $('tokenBox').textContent = '当前 Token：' + token;
+    }
+
+    function getToken() {
+      return localStorage.getItem('token') || '';
+    }
+
+    async function request(path, options = {}) {
+      const token = getToken();
+      const headers = options.headers || {};
+      if (token && !options.skipAuth) {
+        headers['Authorization'] = 'Bearer ' + token;
+      }
+      const resp = await fetch(path, { ...options, headers });
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch (e) { data = { message: text }; }
+      if (!resp.ok) {
+        throw new Error(data.message || data.error || ('HTTP ' + resp.status));
+      }
+      return data;
+    }
+
+    async function register() {
+      try {
+        await request('/api/register', {
+          method: 'POST',
+          skipAuth: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: $('username').value,
+            password: $('password').value
+          })
+        });
+        alert('注册成功，请点击登录');
+      } catch (e) {
+        alert('注册失败：' + e.message);
+      }
+    }
+
+    async function login() {
+      try {
+        const data = await request('/api/login', {
+          method: 'POST',
+          skipAuth: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: $('username').value,
+            password: $('password').value
+          })
+        });
+        setToken(data.token);
+      } catch (e) {
+        alert('登录失败：' + e.message);
+      }
+    }
+
+    async function submitTask() {
+      const fileInput = $('file');
+      if (!fileInput.files || !fileInput.files[0]) {
+        alert('请先选择视频文件');
+        return;
+      }
+      const form = new FormData();
+      form.append('file', fileInput.files[0]);
+      form.append('resolution', $('resolution').value);
+      form.append('bitrate', $('bitrate').value);
+      form.append('video_name', $('videoName').value || fileInput.files[0].name);
+      form.append('tag', $('tag').value);
+
+      $('submitResult').textContent = '正在上传并提交任务...';
+      try {
+        const data = await request('/api/tasks', {
+          method: 'POST',
+          headers: { 'Idempotency-Key': crypto.randomUUID() },
+          body: form
+        });
+        $('submitResult').textContent = JSON.stringify(data, null, 2);
+        $('queryTaskId').value = data.task_id;
+        $('presignTaskId').value = data.task_id;
+        pollTask(data.task_id);
+      } catch (e) {
+        $('submitResult').textContent = '提交失败：' + e.message;
+      }
+    }
+
+    async function queryTask() {
+      const taskId = $('queryTaskId').value.trim();
+      if (!taskId) { alert('请输入任务 ID'); return; }
+      try {
+        const data = await request('/api/tasks?task_id=' + encodeURIComponent(taskId));
+        $('queryResult').textContent = JSON.stringify(data, null, 2);
+        updateProgress(data.progress);
+      } catch (e) {
+        $('queryResult').textContent = '查询失败：' + e.message;
+      }
+    }
+
+    async function getPresign() {
+      const taskId = $('presignTaskId').value.trim();
+      if (!taskId) { alert('请输入任务 ID'); return; }
+      try {
+        const data = await request('/api/tasks/presign?task_id=' + encodeURIComponent(taskId));
+        $('presignResult').innerHTML = '<a href="' + data.url + '" target="_blank">' + data.url + '</a>';
+      } catch (e) {
+        $('presignResult').textContent = '获取失败：' + e.message;
+      }
+    }
+
+    async function search() {
+      const q = $('searchQuery').value.trim();
+      if (!q) { alert('请输入关键词'); return; }
+      try {
+        const data = await request('/api/search?q=' + encodeURIComponent(q));
+        $('searchResult').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+      } catch (e) {
+        $('searchResult').textContent = '搜索失败：' + e.message;
+      }
+    }
+
+    function pollTask(taskId) {
+      let times = 0;
+      const timer = setInterval(async () => {
+        times += 1;
+        try {
+        const data = await request('/api/tasks?task_id=' + encodeURIComponent(taskId));
+          $('queryResult').textContent = JSON.stringify(data, null, 2);
+          updateProgress(data.progress);
+          if (data.status === 'success' || data.status === 'failed' || times >= 30) {
+            clearInterval(timer);
+          }
+        } catch (e) {
+          $('queryResult').textContent = '状态轮询失败：' + e.message;
+          clearInterval(timer);
+        }
+      }, 2000);
+    }
+
+    function updateProgress(percent) {
+      const value = Number(percent) || 0;
+      $('progressBar').style.width = Math.max(0, Math.min(100, value)) + '%';
+    }
+
+    (function init() {
+      const token = getToken();
+      if (token) setToken(token);
+    })();
+  </script>
+</body>
+</html>

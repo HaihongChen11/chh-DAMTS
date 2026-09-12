@@ -1,0 +1,21 @@
+# 构建产物
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.so.*
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 日志与临时文件
+*.log
+*.tmp
+*.part
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
