@@ -34,7 +34,7 @@ install_cmake_project https://github.com/CopernicaMarketingSoftware/AMQP-CPP.git
 install_cmake_project https://github.com/sewenew/redis-plus-plus.git -DREDIS_PLUS_PLUS_CXX_STANDARD=17
 
 # cpr
-install_cmake_project https://github.com/libcpr/cpr.git -DCPR_USE_SYSTEM_CURL=ON
+install_cmake_project https://github.com/libcpr/cpr.git -DCPR_USE_SYSTEM_CURL=ON -DBUILD_SHARED_LIBS=ON
 
 # elasticlient
 install_cmake_project https://github.com/seznam/elasticlient.git -DCMAKE_CXX_STANDARD=17 -DUSE_ALL_SYSTEM_LIBS=YES -DBUILD_ELASTICLIENT_TESTS=OFF -DBUILD_ELASTICLIENT_EXAMPLE=OFF -DBUILD_SHARED_LIBS=ON
