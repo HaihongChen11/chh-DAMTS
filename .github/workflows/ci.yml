@@ -15,7 +15,7 @@ jobs:
           sudo apt-get install -y build-essential cmake git pkg-config \
             libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
             libssl-dev libboost-system-dev libcurl4-openssl-dev libspdlog-dev \
-            nlohmann-json3-dev libhiredis-dev libmysqlcppconn-dev
+            nlohmann-json3-dev libhiredis-dev libmysqlcppconn-dev libjsoncpp-dev libcivetweb-dev civetweb zlib1g-dev
       - name: Build source dependencies
         run: bash scripts/install_deps.sh
       - name: Configure
