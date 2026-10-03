@@ -70,7 +70,8 @@ TaskService::SubmitResult TaskService::submitTask(int64_t userId, const std::str
                                                  const std::string& tag,
                                                  const std::string& resolution, int bitrate,
                                                  const FilePart& file,
-                                                 const std::string& idempotencyKey) {
+                                                 const std::string& idempotencyKey,
+                                                 const std::string& traceId) {
     SubmitResult result;
 
     // 幂等校验：同一幂等 key 重复提交返回已有 task_id
@@ -125,6 +126,7 @@ TaskService::SubmitResult TaskService::submitTask(int64_t userId, const std::str
     msg.retry_count = 0;
     msg.video_name = videoName;
     msg.tag = tag;
+    msg.trace_id = traceId;
     if (!mq_->publish(msg)) {
         // 消息投递失败：任务停留在 pending，由后续对账机制兜底重投
         LOG_ERROR("publish task to mq failed: {}", taskId);
@@ -143,6 +145,71 @@ TaskService::SubmitResult TaskService::submitTask(int64_t userId, const std::str
 
     // 5. 清理临时文件
     if (!file.temp_path.empty()) ::unlink(file.temp_path.c_str());
+
+    result.ok = true;
+    result.task_id = taskId;
+    return result;
+}
+
+TaskService::SubmitResult TaskService::submitTaskFromSource(
+    int64_t userId, const std::string& videoName, const std::string& tag,
+    const std::string& resolution, int bitrate, const std::string& sourceKey,
+    const std::string& idempotencyKey, const std::string& traceId) {
+    SubmitResult result;
+
+    if (!idempotencyKey.empty()) {
+        try {
+            auto existing = redis_->get("idem:" + idempotencyKey);
+            if (existing) {
+                result.ok = true;
+                result.task_id = *existing;
+                return result;
+            }
+        } catch (const sw::redis::Error& e) {
+            LOG_WARN("idempotency check redis error: {}", e.what());
+        }
+    }
+
+    std::string taskId = generateUuid();
+    try {
+        Transaction tx(mysql_.get());
+        std::unique_ptr<sql::PreparedStatement> stmt(tx.conn()->prepareStatement(
+            "INSERT INTO transcode_task (task_id, user_id, source_bucket, source_key, "
+            "output_bucket, resolution, bitrate, status, retry_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0)"));
+        stmt->setString(1, taskId);
+        stmt->setInt64(2, userId);
+        stmt->setString(3, cfg_.minio().source_bucket);
+        stmt->setString(4, sourceKey);
+        stmt->setString(5, cfg_.minio().output_bucket);
+        stmt->setString(6, resolution);
+        stmt->setInt(7, bitrate);
+        stmt->executeUpdate();
+        tx.commit();
+    } catch (const sql::SQLException& e) {
+        LOG_ERROR("insert task failed: {}", e.what());
+        result.error = "insert task failed";
+        return result;
+    }
+
+    TaskMessage msg;
+    msg.task_id = taskId;
+    msg.retry_count = 0;
+    msg.video_name = videoName;
+    msg.tag = tag;
+    msg.trace_id = traceId;
+    if (!mq_->publish(msg)) {
+        result.error = "message queue publish failed";
+        return result;
+    }
+
+    if (!idempotencyKey.empty()) {
+        try {
+            redis_->set("idem:" + idempotencyKey, taskId, std::chrono::seconds(3600));
+        } catch (const sw::redis::Error& e) {
+            LOG_WARN("store idempotency key failed: {}", e.what());
+        }
+    }
 
     result.ok = true;
     result.task_id = taskId;

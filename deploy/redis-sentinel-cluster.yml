@@ -1,0 +1,52 @@
+services:
+  redis-master:
+    image: redis:7
+    command: redis-server --appendonly yes
+    ports:
+      - "6380:6379"
+
+  redis-replica-1:
+    image: redis:7
+    command: redis-server --replicaof redis-master 6379
+    depends_on:
+      - redis-master
+    ports:
+      - "6381:6379"
+
+  redis-replica-2:
+    image: redis:7
+    command: redis-server --replicaof redis-master 6379
+    depends_on:
+      - redis-master
+    ports:
+      - "6382:6379"
+
+  sentinel-1:
+    image: redis:7
+    command: redis-server /etc/redis/sentinel.conf --sentinel
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf
+    depends_on:
+      - redis-master
+    ports:
+      - "26380:26379"
+
+  sentinel-2:
+    image: redis:7
+    command: redis-server /etc/redis/sentinel.conf --sentinel
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf
+    depends_on:
+      - redis-master
+    ports:
+      - "26381:26379"
+
+  sentinel-3:
+    image: redis:7
+    command: redis-server /etc/redis/sentinel.conf --sentinel
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf
+    depends_on:
+      - redis-master
+    ports:
+      - "26382:26379"

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -41,13 +42,29 @@ public:
     Ptr acquire() {
         std::unique_lock<std::mutex> lk(mutex_);
         cv_.wait(lk, [this]() { return !idle_.empty() || total_ < maxSize_; });
+        return acquireLocked(lk);
+    }
 
+    // 带超时等待的连接获取，超时返回 nullptr
+    Ptr acquire(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lk(mutex_);
+        if (!cv_.wait_for(lk, timeout,
+                          [this]() { return !idle_.empty() || total_ < maxSize_; })) {
+            return nullptr;
+        }
+        return acquireLocked(lk);
+    }
+
+    size_t maxSize() const { return maxSize_; }
+
+private:
+    Ptr acquireLocked(std::unique_lock<std::mutex>& lk) {
         T* raw = nullptr;
         for (;;) {
-            if (!idle_.empty()) {
+            if (!idle_.empty()) {//空闲队列非空
                 raw = idle_.front();
                 idle_.pop_front();
-                if (validator_ && !validator_(raw)) {
+                if (validator_ && !validator_(raw)) {//
                     delete raw;
                     --total_;
                     continue; // 失效连接丢弃，尝试下一个
@@ -68,7 +85,7 @@ public:
             break;
         }
 
-        // 自定义 deleter：引用计数归零时归还，而不是销毁
+        // 自定义 deleter（第二个参数lambda）：引用计数归零时归还，而不是销毁。复用连接，减少创建/销毁开销
         return Ptr(raw, [this](T* p) {
             std::lock_guard<std::mutex> l(mutex_);
             idle_.push_back(p);
@@ -76,9 +93,6 @@ public:
         });
     }
 
-    size_t maxSize() const { return maxSize_; }
-
-private:
     Factory factory_;
     Validator validator_;
     size_t maxSize_;

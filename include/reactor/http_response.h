@@ -33,6 +33,7 @@ public:
     static HttpResponse forbidden(const std::string& msg);
     static HttpResponse notFound(const std::string& msg);
     static HttpResponse tooManyRequests(const std::string& msg);
+    static HttpResponse serviceUnavailable(const std::string& msg);
     static HttpResponse internalError(const std::string& msg);
 
 private:
@@ -40,7 +41,7 @@ private:
     std::string statusMessage_ = "OK";
     std::map<std::string, std::string> headers_;
     std::string body_;
-    bool closeConnection_ = true;
+    bool closeConnection_ = false;
 };
 
 } // namespace transcode

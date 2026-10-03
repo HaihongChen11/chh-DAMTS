@@ -116,4 +116,12 @@ add_executable(transcode_worker
 )
 target_link_libraries(transcode_worker PRIVATE transcode_core)
 
+enable_testing()
+option(BUILD_TESTS "Build unit tests" ON)
+if(BUILD_TESTS)
+    add_executable(unit_tests tests/unit_tests.cpp)
+    target_link_libraries(unit_tests PRIVATE transcode_core)
+    add_test(NAME unit_tests COMMAND unit_tests)
+endif()
+
 install(TARGETS api_server transcode_worker RUNTIME DESTINATION bin)

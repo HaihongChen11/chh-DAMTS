@@ -1,7 +1,12 @@
 #include "ffmpeg/ffmpeg_helper.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
+#include <future>
+#include <sstream>
+#include <sys/stat.h>
+#include <unistd.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -25,7 +30,110 @@ std::string avErr(int errnum) {
     av_strerror(errnum, buf, sizeof(buf));
     return std::string(buf);
 }
+
+namespace {
+std::string shellQuote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    out += "'";
+    return out;
+}
+
+bool runCommand(const std::string& cmd, std::string* err) {
+    int rc = std::system(cmd.c_str());
+    if (rc != 0) {
+        if (err) *err = "command failed: " + cmd;
+        return false;
+    }
+    return true;
+}
+
+double probeDuration(const std::string& path) {
+    FILE* f = ::popen(("ffprobe -v error -show_entries format=duration "
+                       "-of csv=p=0 " + shellQuote(path)).c_str(), "r");
+    if (!f) return 0.0;
+    char buf[128] = {0};
+    size_t n = ::fread(buf, 1, sizeof(buf) - 1, f);
+    ::pclose(f);
+    return n ? std::atof(buf) : 0.0;
+}
 } // namespace
+} // namespace
+
+bool transcodeVideoSharded(const TranscodeParams& p, MediaInfo* info, std::string* err) {
+    if (p.shard_count <= 1) return transcodeVideo(p, info, err);
+
+    const double duration = probeDuration(p.input_path);
+    if (duration <= 0.0) return transcodeVideo(p, info, err);
+
+    const int shards = std::min(p.shard_count, 8);
+    const double seg = duration / shards;
+    const std::string dir = "/dev/shm/transcode_shard_" + std::to_string(::getpid());
+    std::string mkdirCmd = "mkdir -p " + shellQuote(dir);
+    if (!runCommand(mkdirCmd, err)) return false;
+    const std::string srcPath = dir + "/src.mp4";
+    if (!runCommand("cp " + shellQuote(p.input_path) + " " + shellQuote(srcPath), err)) {
+        return false;
+    }
+
+    std::vector<std::future<bool>> futures;
+    for (int i = 0; i < shards; ++i) {
+        futures.push_back(std::async(std::launch::async, [&, i]() {
+            double start = i * seg;
+            double len = (i == shards - 1) ? (duration - start) : seg;
+            std::ostringstream trans;
+            trans << "ffmpeg -y -ss " << start << " -t " << len
+                  << " -i " << shellQuote(srcPath)
+                  << " -vf scale=" << p.resolution
+                  << " -c:v libx264 -b:v " << p.bitrate
+                  << " -preset ultrafast"
+                  << " -threads 4"
+                  << " -c:a aac -ar 44100 -ac 2 "
+                  << shellQuote(dir + "/out_" + std::to_string(i) + ".mp4");
+            std::string e;
+            return runCommand(trans.str(), &e);
+        }));
+    }
+
+    bool ok = true;
+    for (auto& f : futures) ok = f.get() && ok;
+    if (!ok) {
+        if (err) *err = "sharded transcode failed";
+        return false;
+    }
+
+    std::ostringstream list;
+    for (int i = 0; i < shards; ++i) {
+        list << "file '" << (dir + "/out_" + std::to_string(i) + ".mp4") << "'\n";
+    }
+    std::string listPath = dir + "/list.txt";
+    FILE* lf = ::fopen(listPath.c_str(), "w");
+    if (!lf) {
+        if (err) *err = "write concat list failed";
+        return false;
+    }
+    ::fwrite(list.str().data(), 1, list.str().size(), lf);
+    ::fclose(lf);
+
+    std::ostringstream concat;
+    concat << "ffmpeg -y -f concat -safe 0 -i " << shellQuote(listPath)
+           << " -c copy " << shellQuote(p.output_path);
+    if (!runCommand(concat.str(), err)) return false;
+
+    if (info) {
+        info->width = 0;
+        info->height = 0;
+        info->duration = duration;
+        struct stat st;
+        if (::stat(p.output_path.c_str(), &st) == 0) info->size = st.st_size;
+    }
+    std::string rmCmd = "rm -rf " + shellQuote(dir);
+    ::system(rmCmd.c_str());
+    return true;
+}
 
 bool transcodeVideo(const TranscodeParams& p, MediaInfo* info, std::string* err) {
     AVFormatContext* ifmt = nullptr;
@@ -95,6 +203,9 @@ bool transcodeVideo(const TranscodeParams& p, MediaInfo* info, std::string* err)
     vencCtx->bit_rate = p.bitrate;
     vencCtx->gop_size = 25;
     vencCtx->max_b_frames = 1;
+    // 限制编码线程数，降低单任务内存占用；工业级可再按机器核数调优
+    vencCtx->thread_count = 2;
+    vencCtx->thread_type = FF_THREAD_FRAME;
     if (ofmt->oformat->flags & AVFMT_GLOBALHEADER)
         vencCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     if (avcodec_open2(vencCtx, venc, nullptr) < 0) FAIL("open video encoder failed");
@@ -121,6 +232,7 @@ bool transcodeVideo(const TranscodeParams& p, MediaInfo* info, std::string* err)
                     aencCtx->channels = 2;
                     aencCtx->sample_fmt = aenc->sample_fmts[0];
                     aencCtx->time_base = AVRational{1, 44100};
+                    aencCtx->thread_count = 1;
                     if (ofmt->oformat->flags & AVFMT_GLOBALHEADER)
                         aencCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
                     if (avcodec_open2(aencCtx, aenc, nullptr) < 0) {

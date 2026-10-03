@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transcode-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: transcode-api
+  template:
+    metadata:
+      labels:
+        app: transcode-api
+    spec:
+      containers:
+        - name: api-server
+          image: ghcr.io/haihongchen11/chh-damts:latest
+          command: ["./build/api_server", "config.json"]
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: transcode-api
+spec:
+  selector:
+    app: transcode-api
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transcode-worker
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: transcode-worker
+  template:
+    metadata:
+      labels:
+        app: transcode-worker
+    spec:
+      containers:
+        - name: transcode-worker
+          image: ghcr.io/haihongchen11/chh-damts:latest
+          command: ["./build/transcode_worker", "config.json"]

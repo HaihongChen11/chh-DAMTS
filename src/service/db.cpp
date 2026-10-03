@@ -1,5 +1,6 @@
 #include "service/db.h"
 
+#include <chrono>
 #include <cppconn/driver.h>
 #include <cppconn/exception.h>
 #include <cppconn/prepared_statement.h>
@@ -37,6 +38,16 @@ MysqlPool::MysqlPool(const Config::Mysql& cfg) {
 
 MysqlPool::ConnPtr MysqlPool::acquire() {
     return pool_->acquire();
+}
+
+bool MysqlPool::ping() {
+    auto conn = pool_->acquire(std::chrono::milliseconds(2000));
+    if (!conn) return false;
+    try {
+        return !conn->isClosed() && conn->isValid();
+    } catch (...) {
+        return false;
+    }
 }
 
 Transaction::Transaction(MysqlPool* pool) {

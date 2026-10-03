@@ -27,6 +27,7 @@ public:
 
     Config cfg;
     std::shared_ptr<ThreadPool> threadPool;
+    std::shared_ptr<ThreadPool> uploadPool;
     std::shared_ptr<sw::redis::Redis> redis;
     std::shared_ptr<MysqlPool> mysql;
     std::shared_ptr<StorageService> storage;

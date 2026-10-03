@@ -4,7 +4,7 @@
 
 #include <cppconn/prepared_statement.h>
 #include <cppconn/resultset.h>
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 #include <sw/redis++/redis.h>
 
 #include "common/logger.h"
@@ -32,10 +32,14 @@ AuthService::AuthService(std::shared_ptr<MysqlPool> mysql,
     : mysql_(std::move(mysql)), redis_(std::move(redis)), tokenTtl_(token_ttl_seconds) {}
 
 std::string AuthService::hashPassword(const std::string& salt, const std::string& password) const {
-    std::string input = salt + password;
-    unsigned char digest[SHA256_DIGEST_LENGTH];
-    SHA256(reinterpret_cast<const unsigned char*>(input.data()), input.size(), digest);
-    return toHex(digest, SHA256_DIGEST_LENGTH);
+    constexpr int kIterations = 100000;
+    constexpr int kKeyLen = 32;
+    unsigned char digest[kKeyLen];
+    PKCS5_PBKDF2_HMAC(
+        password.data(), static_cast<int>(password.size()),
+        reinterpret_cast<const unsigned char*>(salt.data()), static_cast<int>(salt.size()),
+        kIterations, EVP_sha256(), kKeyLen, digest);
+    return toHex(digest, kKeyLen);
 }
 
 bool AuthService::registerUser(const std::string& username, const std::string& password,

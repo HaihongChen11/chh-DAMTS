@@ -14,8 +14,9 @@
 
 namespace transcode {
 
-HttpServer::HttpServer(EventLoop* loop, const std::string& ip, uint16_t port)
-    : loop_(loop), ip_(ip), port_(port) {
+HttpServer::HttpServer(EventLoop* acceptLoop, const std::vector<EventLoop*>& subLoops,
+                       const std::string& ip, uint16_t port)
+    : loop_(acceptLoop), subLoops_(subLoops), ip_(ip), port_(port) {
     listenFd_ = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, IPPROTO_TCP);
     if (listenFd_ < 0) {
         LOG_ERROR("socket create failed: {}", strerror(errno));
@@ -68,6 +69,7 @@ void HttpServer::start() {
 
 void HttpServer::onAccept(uint32_t /*events*/) {
     for (;;) {
+        if (!accepting_.load()) break;
         struct sockaddr_in peer;
         socklen_t len = sizeof(peer);
         int connfd = ::accept4(listenFd_, reinterpret_cast<struct sockaddr*>(&peer), &len,
@@ -78,7 +80,9 @@ void HttpServer::onAccept(uint32_t /*events*/) {
             break;
         }
 
-        auto conn = std::make_shared<TcpConnection>(loop_, connfd);
+        EventLoop* connLoop = subLoops_[nextLoopIndex_ % subLoops_.size()];
+        ++nextLoopIndex_;
+        auto conn = std::make_shared<TcpConnection>(connLoop, connfd);
         conn->setConnectionCallback([this](const TcpConnectionPtr& c) { onConnection(c); });
         conn->setMessageCallback([this](const TcpConnectionPtr& c, Buffer* b) { onMessage(c, b); });
         conn->setCloseCallback([this](const TcpConnectionPtr& c) { onClose(c); });
@@ -113,6 +117,16 @@ void HttpServer::onMessage(const TcpConnectionPtr& conn, Buffer* buf) {
     ctx.parser.reset();
     ctx.busy = true;
     if (httpCallback_) httpCallback_(std::move(req), conn);
+}
+
+void HttpServer::onResponseSent(const TcpConnectionPtr& conn) {
+    conn->getLoop()->runInLoop([conn]() {
+        auto* ctxPtr = std::any_cast<std::shared_ptr<HttpContext>>(
+            conn->getMutableContext());
+        if (ctxPtr && *ctxPtr) {
+            (*ctxPtr)->busy = false;
+        }
+    });
 }
 
 void HttpServer::onClose(const TcpConnectionPtr& /*conn*/) {

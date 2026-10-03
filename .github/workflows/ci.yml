@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git pkg-config \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
+            libssl-dev libboost-system-dev libcurl4-openssl-dev libspdlog-dev \
+            nlohmann-json3-dev libhiredis-dev libmysqlcppconn-dev
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release .
+      - name: Build
+        run: cmake --build build -j"$(nproc)"

@@ -40,7 +40,12 @@ public:
     };
     SubmitResult submitTask(int64_t userId, const std::string& videoName, const std::string& tag,
                             const std::string& resolution, int bitrate, const FilePart& file,
-                            const std::string& idempotencyKey);
+                            const std::string& idempotencyKey, const std::string& traceId);
+    SubmitResult submitTaskFromSource(int64_t userId, const std::string& videoName,
+                                      const std::string& tag, const std::string& resolution,
+                                      int bitrate, const std::string& sourceKey,
+                                      const std::string& idempotencyKey,
+                                      const std::string& traceId);
 
     nlohmann::json getTaskStatus(int64_t userId, const std::string& taskId);
     std::string getPresignedUrl(int64_t userId, const std::string& taskId);

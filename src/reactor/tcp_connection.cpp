@@ -56,8 +56,10 @@ void TcpConnection::connectEstablished() {
     setTcpNoDelay(fd_, true);
     events_ = EPOLLIN;
     lastActiveTime_ = steadyNowMs();
-    loop_->addConnection(shared_from_this());
-    if (connectionCallback_) connectionCallback_(shared_from_this());
+    loop_->runInLoop([conn = shared_from_this()]() {
+        conn->loop_->addConnection(conn);
+        if (conn->connectionCallback_) conn->connectionCallback_(conn);
+    });
 }
 
 void TcpConnection::connectDestroyed() {

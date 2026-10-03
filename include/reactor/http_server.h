@@ -1,9 +1,11 @@
 #pragma once
 
 #include <any>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "common/noncopyable.h"
 #include "reactor/http_parser.h"
@@ -27,11 +29,14 @@ public:
     using TcpConnectionPtr = std::shared_ptr<TcpConnection>;
     using HttpCallback = std::function<void(HttpRequest, TcpConnectionPtr)>;
 
-    HttpServer(EventLoop* loop, const std::string& ip, uint16_t port);
+    HttpServer(EventLoop* acceptLoop, const std::vector<EventLoop*>& subLoops,
+               const std::string& ip, uint16_t port);
     ~HttpServer();
 
     void setHttpCallback(HttpCallback cb) { httpCallback_ = std::move(cb); }
     void setConnectionTimeoutMs(int64_t ms) { connectionTimeoutMs_ = ms; }
+    void stopAccepting() { accepting_ = false; }
+    void onResponseSent(const TcpConnectionPtr& conn);
 
     void start();
 
@@ -42,11 +47,14 @@ private:
     void onClose(const TcpConnectionPtr& conn);
 
     EventLoop* loop_;
+    std::vector<EventLoop*> subLoops_;
+    size_t nextLoopIndex_ = 0;
     std::string ip_;
     uint16_t port_;
     int listenFd_ = -1;
     int64_t connectionTimeoutMs_ = 60000;
     HttpCallback httpCallback_;
+    std::atomic<bool> accepting_{true};
 };
 
 } // namespace transcode

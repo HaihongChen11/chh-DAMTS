@@ -69,6 +69,7 @@ public:
     struct Worker {
         int max_retry = 3;
         int concurrency = 4;
+        int shard_count = 0;
         std::string ffmpeg_path = "ffmpeg";
         int default_bitrate = 1500000;
     };

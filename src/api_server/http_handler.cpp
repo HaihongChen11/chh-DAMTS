@@ -1,11 +1,14 @@
 #include "api_server/http_handler.h"
 
 #include <fstream>
+#include <atomic>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
+#include <sw/redis++/redis.h>
 
 #include "common/logger.h"
+#include "common/uuid.h"
 #include "metrics/metrics.h"
 #include "reactor/http_response.h"
 #include "service/task_service.h"
@@ -111,7 +114,8 @@ void handleSubmitTask(ServiceRegistry* svc, const HttpRequest& req, HttpResponse
     std::string tag = get("tag", "");
     std::string idemKey = req.getHeader("idempotency-key");
 
-    auto result = svc->task->submitTask(uid, videoName, tag, resolution, bitrate, req.file, idemKey);
+    auto result = svc->task->submitTask(uid, videoName, tag, resolution, bitrate,
+                                        req.file, idemKey, req.getHeader("x-trace-id"));
     if (result.ok) {
         Metrics::instance().incTaskSubmitted();
         *resp = HttpResponse::created(nlohmann::json{{"task_id", result.task_id}}.dump());
@@ -163,6 +167,46 @@ void handleSearch(ServiceRegistry* svc, const HttpRequest& req, HttpResponse* re
     *resp = HttpResponse::ok(result);
 }
 
+void handlePresignUpload(ServiceRegistry* svc, const HttpRequest& req, HttpResponse* resp) {
+    int64_t uid = requireAuth(svc, req, resp);
+    if (uid == 0) return;
+    auto params = req.queryParams();
+    std::string filename = params.count("filename") ? params["filename"] : "video.mp4";
+    std::string key = "users/" + std::to_string(uid) + "/" + generateUuid() + "/" + filename;
+    std::string url = svc->storage->presignUploadUrl(svc->cfg.minio().source_bucket, key, 3600);
+    *resp = HttpResponse::ok(nlohmann::json{{"upload_url", url}, {"source_key", key}}.dump());
+}
+
+void handleDirectTask(ServiceRegistry* svc, const HttpRequest& req, HttpResponse* resp) {
+    int64_t uid = requireAuth(svc, req, resp);
+    if (uid == 0) return;
+    if (!svc->rateLimiter->allow("rate:" + std::to_string(uid))) {
+        *resp = HttpResponse::tooManyRequests("rate limit exceeded");
+        return;
+    }
+    nlohmann::json body = parseJsonBody(req, resp);
+    if (body.is_null()) return;
+    std::string sourceKey = body.value("source_key", "");
+    if (sourceKey.empty()) {
+        *resp = HttpResponse::badRequest("missing source_key");
+        return;
+    }
+    std::string resolution = body.value("resolution", "1280x720");
+    int bitrate = svc->cfg.worker().default_bitrate;
+    try { bitrate = std::stoi(body.value("bitrate", std::to_string(bitrate))); } catch (...) {}
+    if (bitrate < 100000) bitrate = svc->cfg.worker().default_bitrate;
+    auto result = svc->task->submitTaskFromSource(
+        uid, body.value("video_name", "video"), body.value("tag", ""),
+        resolution, bitrate, sourceKey, req.getHeader("idempotency-key"),
+        req.getHeader("x-trace-id"));
+    if (result.ok) {
+        Metrics::instance().incTaskSubmitted();
+        *resp = HttpResponse::created(nlohmann::json{{"task_id", result.task_id}}.dump());
+    } else {
+        *resp = HttpResponse::internalError(result.error);
+    }
+}
+
 } // namespace
 
 void registerRoutes(Router* router, ServiceRegistry* svc) {
@@ -174,6 +218,26 @@ void registerRoutes(Router* router, ServiceRegistry* svc) {
     });
     router->addRoute("GET", "/healthz", [](const HttpRequest&, HttpResponse* resp) {
         *resp = HttpResponse::ok(nlohmann::json{{"status", "ok"}}.dump());
+    });
+    router->addRoute("GET", "/readyz", [svc](const HttpRequest&, HttpResponse* resp) {
+        nlohmann::json j;
+        j["status"] = "ok";
+
+        try {
+            svc->redis->ping();
+            j["redis"] = "ok";
+        } catch (const std::exception&) {
+            j["redis"] = "down";
+            j["status"] = "degraded";
+        }
+
+        j["mysql"] = svc->mysql->ping() ? "ok" : "down";
+        if (j["mysql"] == "down") j["status"] = "degraded";
+
+        j["rabbitmq"] = svc->mq->isConnected() ? "ok" : "down";
+        if (j["rabbitmq"] == "down") j["status"] = "degraded";
+
+        *resp = HttpResponse::ok(j.dump());
     });
     router->addRoute("GET", "/metrics", [](const HttpRequest&, HttpResponse* resp) {
         HttpResponse r = HttpResponse::ok(Metrics::instance().serialize());
@@ -201,18 +265,67 @@ void registerRoutes(Router* router, ServiceRegistry* svc) {
     router->addRoute("GET", "/api/search", [svc](const HttpRequest& req, HttpResponse* resp) {
         handleSearch(svc, req, resp);
     });
+    router->addRoute("GET", "/api/presign-upload", [svc](const HttpRequest& req, HttpResponse* resp) {
+        handlePresignUpload(svc, req, resp);
+    });
+    router->addRoute("POST", "/api/tasks/direct", [svc](const HttpRequest& req, HttpResponse* resp) {
+        handleDirectTask(svc, req, resp);
+    });
 }
 
-HttpServer::HttpCallback makeHttpCallback(Router* router, ServiceRegistry* svc) {
-    return [router, svc](HttpRequest req, HttpServer::TcpConnectionPtr conn) {
-        // 立即投递业务线程池，epoll 主循环马上回归继续处理其它连接
-        svc->threadPool->enqueue([router, svc, req = std::move(req), conn = std::move(conn)]() {
+HttpServer::HttpCallback makeHttpCallback(Router* router, ServiceRegistry* svc,
+                                          HttpServer* server) {
+    return [router, svc, server](HttpRequest req, HttpServer::TcpConnectionPtr conn) {
+        const bool keepAlive = (req.getHeader("connection") != "close");
+        std::string traceId = req.getHeader("x-trace-id");
+        if (traceId.empty()) traceId = generateUuid();
+        static std::atomic<uint64_t> counter{0};
+        if ((counter.fetch_add(1) % 100) == 0) {
+            LOG_INFO("request trace_id={} method={} path={}",
+                     traceId, req.method, req.path);
+        }
+
+        // 健康检查与指标接口走 Reactor 快路径，不进入线程池
+        if (req.method == "GET" &&
+            (req.path == "/healthz" || req.path == "/metrics")) {
             Metrics::instance().incQps();
             HttpResponse resp;
             router->route(req, &resp);
+            resp.setCloseConnection(!keepAlive);
+            conn->send(resp.toString());
+            if (keepAlive) {
+                server->onResponseSent(conn);
+            } else {
+                conn->shutdown();
+            }
+            return;
+        }
+
+        // 立即投递业务线程池，epoll 主循环马上回归继续处理其它连接
+        ThreadPool* pool = (req.method == "POST" &&
+                            (req.path == "/api/tasks" || req.path == "/api/tasks/direct"))
+                               ? svc->uploadPool.get()
+                               : svc->threadPool.get();
+        bool queued = pool->tryEnqueue(
+            [router, svc, server, req = std::move(req), conn = std::move(conn),
+             keepAlive]() {
+            Metrics::instance().incQps();
+            HttpResponse resp;
+            router->route(req, &resp);
+            resp.setCloseConnection(!keepAlive);
+            conn->send(resp.toString());
+            if (keepAlive) {
+                server->onResponseSent(conn);
+            } else {
+                conn->shutdown();
+            }
+        });
+        if (!queued) {
+            HttpResponse resp = HttpResponse::serviceUnavailable("server busy, please retry later");
+            resp.setCloseConnection(true);
             conn->send(resp.toString());
             conn->shutdown();
-        });
+        }
     };
 }
 

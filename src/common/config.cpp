@@ -1,5 +1,6 @@
 #include "common/config.h"
 
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -8,6 +9,11 @@
 namespace transcode {
 
 namespace {
+std::string envOr(const std::string& value, const char* name) {
+    const char* env = std::getenv(name);
+    return (env && env[0] != '\0') ? std::string(env) : value;
+}
+
 // 按 '.' 切分路径
 std::vector<std::string> splitPath(const std::string& path) {
     std::vector<std::string> parts;
@@ -101,11 +107,18 @@ bool Config::load(const std::string& path) {
 
     worker_.max_retry = get<int>("worker.max_retry", 3);
     worker_.concurrency = get<int>("worker.concurrency", 4);
+    worker_.shard_count = get<int>("worker.shard_count", 0);
     worker_.ffmpeg_path = get<std::string>("worker.ffmpeg_path", "ffmpeg");
     worker_.default_bitrate = get<int>("worker.default_bitrate", 1500000);
 
     metrics_.bind = get<std::string>("metrics.bind", "0.0.0.0");
     metrics_.port = get<int>("metrics.port", 9100);
+
+    // 敏感信息优先从环境变量读取，避免硬编码到配置文件或日志中
+    mysql_.password = envOr(mysql_.password, "TRANSCODE_MYSQL_PASSWORD");
+    redis_.password = envOr(redis_.password, "TRANSCODE_REDIS_PASSWORD");
+    rabbitmq_.password = envOr(rabbitmq_.password, "TRANSCODE_RABBITMQ_PASSWORD");
+    minio_.secret_key = envOr(minio_.secret_key, "TRANSCODE_MINIO_SECRET_KEY");
 
     LOG_INFO("config loaded: server={}:{} mysql={}:{} redis={}:{} mq={}:{}",
              server_.host, server_.port, mysql_.host, mysql_.port,

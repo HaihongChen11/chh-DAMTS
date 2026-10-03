@@ -1,168 +1,235 @@
 # 分布式多媒体异步转码处理服务
 
-一个基于 **C++17** 的分布式视频异步转码后端，采用「HTTP API 网关 + 转码 Worker」双进程架构。
-核心亮点：**手写 epoll Reactor 网络库、流式 multipart 解析、连接池/线程池、Redis 滑动窗口限流与分布式锁、
-MySQL 事务、RabbitMQ 可靠性投递（confirm / 手动 ACK / 死信队列）、MinIO 对象存储、Elasticsearch 全文检索，
-以及基于 FFmpeg 底层 C 库（libav\*）的转码与缩略图抽取**。
+基于 C++17 的分布式视频异步转码后端，采用「HTTP API 网关 + 转码 Worker」双进程架构。客户端通过 HTTP 上传视频并提交任务，API 服务将任务投递到 RabbitMQ，由多个 Worker 异步消费并调用 FFmpeg 完成转码与缩略图。
 
-> 说明：本仓库为简历/学习项目，代码聚焦于 C++ 服务端工程实践与分布式中间件整合，运行环境为 Linux（Ubuntu）。
-> 由于依赖 FFmpeg、aws-sdk、prometheus-cpp 等原生库，**无法在 Windows 下直接编译**，请在 WSL / 云主机 /
-> VSCode Remote-SSH 的 Ubuntu 环境中构建运行。
+核心能力：
+
+- 手写 epoll Reactor 网络层
+- 流式 multipart 大文件上传
+- Redis 限流、幂等、分布式锁
+- RabbitMQ 可靠消息、死信队列
+- MinIO 对象存储与客户端直传
+- MySQL 事务、Elasticsearch 检索
+- FFmpeg 分片并行转码
+- Web 操作台、Prometheus 指标
 
 ---
 
 ## 一、整体架构
 
-```
-                          ┌─────────────────────────────────────────────┐
-                          │               api_server (HTTP)             │
-                          │                                             │
-  client ──HTTP──►  ┌────►│  epoll Reactor  ──► 线程池 ──► Router 处理层  │
-  (curl/App)        │     │   (ET 模式 / 超时扫描 / fd 防泄漏)             │
-                    │     └──────────┬───────────────┬───────────────┬──┘
-                    │                │               │               │
-                    │        Redis 限流/锁      MySQL 事务      MinIO 上传
-                    │        (滑动窗口/        (任务落库)      (源视频对象)
-                    │         分布式锁)
-                    │                └───────────────┬───────────────┘
-                    │                                │
-                    │                   RabbitMQ (durable + confirm)
-                    │                                │ 手动 ACK / DLX
-                    │                                ▼
-                    │     ┌─────────────────────────────────────────────┐
-                    └────►│            transcode_worker (多实例)          │
-                          │  消费 MQ ──► 分布式锁抢占 ──► MinIO 下载源视频   │
-                          │  ──► FFmpeg(libav*) 转码 + 缩略图 ──► 回传 MinIO│
-                          │  ──► MySQL 状态流转(事务) + ES 元数据同步       │
-                          └─────────────────────────────────────────────┘
-
-  中间件: MySQL · Redis · RabbitMQ · MinIO(S3) · Elasticsearch
-  可观测: Prometheus 指标 (/metrics) · spdlog 日志
+```text
+客户端 / 浏览器
+    │ HTTP/2
+    ▼
+Nginx（反向代理 + 负载均衡）
+    │ HTTP/1.1
+    ▼
+api_server（多 Reactor + 线程池）
+    ├─ 鉴权、限流、幂等
+    ├─ MinIO 直传 / 上传
+    ├─ MySQL 落库
+    └─ RabbitMQ 发布
+         │
+         ▼
+RabbitMQ（durable + confirm + 手动 ACK + DLX）
+         │
+         ▼
+transcode_worker × N
+    ├─ Redis 分布式锁
+    ├─ MinIO 下载源视频
+    ├─ FFmpeg 分片并行转码 + 缩略图
+    └─ 回传 MinIO，更新 MySQL，同步 ES
 ```
 
-### 数据流（一次完整的转码请求）
+Nginx 支持：
 
-1. **提交**：客户端 `POST /api/tasks` 携带 `multipart/form-data` 视频文件。
-   - Reactor 边解析边把文件流写入临时文件（大文件不占内存）。
-   - 线程池内依次：`鉴权` → `滑动窗口限流` → `幂等校验(Redis)` → `上传 MinIO` → `MySQL 事务插入 pending` → `RabbitMQ confirm 发布`。
-2. **消费**：`transcode_worker` 从 MQ 拿到任务，`Redis 分布式锁` 抢占（多 worker 防重复消费），状态置 `processing`。
-3. **转码**：从 MinIO 下载源视频 → libav\* 解码/缩放/重采样 → H.264 + AAC 编码 → 抽取 MJPEG 缩略图 → 回传 MinIO。
-4. **收尾**：`MySQL 事务` 更新为 `success` 并写 `video_meta`，`ES` 同步元数据，`手动 ACK`。
-   失败则按重试次数重投；超限 `reject(no-requeue)` 进入**死信队列**。
+- 反向代理
+- 多实例负载均衡
+- HTTP/2 接入
+- TLS 终止
+- 静态资源服务
+
+
+
+任务状态机：
+
+```text
+pending → processing → success / failed
+```
+
+## 一、详细数据流
+
+### 提交任务流程
+
+1. 客户端向 `api_server` 发起 `POST /api/tasks`，使用 `multipart/form-data` 上传视频。
+2. Reactor 线程接收 TCP 数据，交给 HTTP 解析器。
+3. HTTP 解析器边接收边把文件写入 `/tmp/transcode_upload_<uuid>.part`，避免大文件占满内存。
+4. 请求解析完成后，投递到业务线程池。
+5. 业务线程依次执行：
+   - 鉴权：从 `Authorization: Bearer <token>` 获取 token，Redis 查询用户 ID。
+   - 限流：Redis Lua 滑动窗口限流。
+   - 幂等：检查 Redis `idem:<Idempotency-Key>`。
+   - 上传：源视频流式上传 MinIO `source-videos`。
+   - 落库：MySQL 事务插入 `transcode_task`，状态为 `pending`。
+   - 投递：RabbitMQ 发布任务消息，等待 publisher confirm。
+6. 返回 `task_id` 给客户端。
+
+### 直传流程
+
+1. 客户端请求 `GET /api/presign-upload?filename=xxx`。
+2. `api_server` 返回 MinIO 预签名上传 URL 和 `source_key`。
+3. 客户端直接 `PUT` 文件到 MinIO。
+4. 客户端请求 `POST /api/tasks/direct`，提交 `source_key` 创建任务。
+5. 后续流程与普通提交一致。
+
+### Worker 转码流程
+
+1. Worker 从 RabbitMQ 消费任务消息。
+2. 使用 Redis 分布式锁抢占 `lock:task:<task_id>`，防止重复消费。
+3. MySQL 更新任务状态为 `processing`。
+4. 从 MinIO 下载源视频到本地。
+5. FFmpeg 按配置分片并行转码：
+   - 源文件复制到 `/dev/shm`。
+   - 按时间切成 N 段。
+   - 多线程并行转码。
+   - 合并分片为最终 MP4。
+6. 抽取缩略图并上传 MinIO。
+7. 上传转码产物到 MinIO。
+8. MySQL 事务更新任务为 `success`，写入 `video_meta`。
+9. Elasticsearch 同步元数据。
+10. RabbitMQ 手动 ACK。
+
+### 失败流程
+
+1. 转码失败时，`retry_count + 1`。
+2. 未超过最大重试次数：重新发布任务消息。
+3. 超过最大重试次数：更新任务为 `failed`，消息 `reject` 进入死信队列。
+
+### 查询流程
+
+1. 客户端请求 `GET /api/tasks?task_id=xxx`。
+2. 先查 Redis `task:<task_id>` 缓存。
+3. 缓存命中直接返回。
+4. 缓存未命中查 MySQL，回写 Redis。
+5. 任务成功后，可请求 `GET /api/tasks/presign` 获取下载 URL。
 
 ---
 
 ## 二、功能特性
 
-| 模块 | 实现要点 |
+| 模块 | 说明 |
 | ---- | ---- |
-| **网络层** | 手写 epoll（ET + EPOLLRDHUP）Reactor，非阻塞 IO + `EAGAIN` 处理；`eventfd` 跨线程唤醒、`timerfd` 定时器队列 |
-| **HTTP 解析** | 手写 HTTP/1.1 解析器，**流式 multipart/form-data**（边界跨包保留、临时文件落盘、超大文件不 OOM） |
-| **连接管理** | TCP 连接状态机，空闲连接超时扫描（`lastActiveTime` + 定时遍历），fd 防泄漏 |
-| **并发模型** | 泛型连接池 `ConnectionPool<T>`（RAII 自动归还）+ 业务线程池（`packaged_task/future`） |
-| **限流** | Redis Lua 脚本实现**滑动窗口**（ZSET + `ZREMRANGEBYSCORE`） |
-| **分布式锁** | Redis Lua 脚本（`GET + DEL` 比对 owner）释放，TTL 防死锁 |
-| **幂等** | `Idempotency-Key` → Redis `idem:` 键，重复提交直接返回已有 task_id |
-| **存储** | MinIO（S3 协议，`useVirtualAddressing=false`），上传流式 `Aws::FStream`，预签名 URL 下载 |
-| **消息队列** | RabbitMQ：durable 交换机/队列、publisher confirm、手动 ACK、QoS(prefetch=1)、DLX 死信队列 |
-| **缓存** | Cache-Aside 任务状态缓存（`task:` 键，读缓存→回源→写缓存，写时失效） |
-| **检索** | Elasticsearch（ES7 no-type）多字段 `multi_match` 全文检索 |
-| **转码** | FFmpeg `libavformat/libavcodec/libswscale/libswresample` 直接调用（非 `system()`），H.264 + AAC + MJPEG 缩略图 |
-| **可观测** | prometheus-cpp 指标（QPS / 提交 / 成功 / 失败 / 在途任务），spdlog 分级日志 |
+| 网络层 | 主从多 Reactor、epoll ET、Keep-Alive |
+| HTTP | 手写 HTTP/1.1 解析、multipart 流式上传 |
+| 并发 | 有界线程池、通用连接池、连接超时 |
+| 鉴权 | PBKDF2 密码哈希、token 会话 |
+| 限流 | Redis 滑动窗口 |
+| 幂等 | Idempotency-Key |
+| 分布式锁 | Redis SET NX PX + Lua 释放 |
+| 消息队列 | RabbitMQ confirm、手动 ACK、死信队列 |
+| 对象存储 | MinIO、Multipart Upload、客户端直传 |
+| 数据库 | MySQL 事务、Cache-Aside |
+| 检索 | Elasticsearch multi_match |
+| 转码 | FFmpeg 分片并行、缩略图 |
+| 可观测 | trace_id、Prometheus、spdlog |
+| 部署 | Dockerfile、Compose、K8s YAML、CI |
+| 接入层 | Nginx 反向代理、负载均衡、HTTP/2 |
 
 ---
 
 ## 三、目录结构
 
-```
+```text
 .
-├── CMakeLists.txt            # CMake 构建脚本
-├── config.json               # 服务配置（服务器/中间件/worker）
-├── sql/init.sql              # MySQL 建库建表脚本
-├── include/                  # 头文件
-│   ├── reactor/              #   手写网络库：event_loop / tcp_connection / epoller / http_parser / http_server / router / http_response / buffer
-│   ├── pool/                 #   线程池 / 泛型连接池
-│   ├── redis/                #   滑动窗口限流 / 分布式锁
-│   ├── service/              #   业务层：auth / task / db / storage / mq / es / service_registry / types
-│   ├── ffmpeg/               #   FFmpeg libav* 封装（转码 + 缩略图）
-│   ├── metrics/              #   Prometheus 指标
-│   ├── api_server/           #   HTTP 路由注册与回调
-│   └── common/               #   配置加载 / 日志 / uuid / noncopyable
-└── src/                      # 实现（与 include 一一对应）+ 两个 main
-    ├── api_server/main.cpp   # HTTP 服务进程入口
-    └── worker/main.cpp       # 转码 Worker 进程入口
+├── CMakeLists.txt
+├── Dockerfile
+├── docker-compose.yml
+├── config.json
+├── README.md
+├── sql/
+│   ├── init.sql
+│   └── create_user.sql
+├── include/
+│   ├── reactor/
+│   ├── pool/
+│   ├── redis/
+│   ├── service/
+│   ├── ffmpeg/
+│   ├── metrics/
+│   ├── api_server/
+│   └── common/
+├── src/
+│   ├── api_server/
+│   ├── worker/
+│   └── ...
+├── tests/
+│   └── unit_tests.cpp
+├── web/
+│   └── index.html
+└── deploy/
+    ├── nginx.conf
+    ├── k8s.yaml
+    ├── prometheus.yml
+    ├── alert.rules.yml
+    ├── redis-sentinel.conf
+    ├── redis-sentinel-cluster.yml
+    └── opentelemetry-collector.yml
 ```
+
+## 三、模块详解与代码位置
+
+| 模块 | 关键文件 | 作用 |
+| ---- | ---- | ---- |
+| 事件循环 | `src/reactor/event_loop.cpp` | epoll 事件分发、定时器、跨线程唤醒 |
+| TCP 连接 | `src/reactor/tcp_connection.cpp` | 连接状态机、读写缓冲、半关闭 |
+| HTTP 解析 | `src/reactor/http_parser.cpp` | HTTP/1.1 与 multipart 流式解析 |
+| HTTP 服务 | `src/reactor/http_server.cpp` | 监听、accept、多 Reactor 分发 |
+| 线程池 | `src/pool/thread_pool.cpp` | 有界队列、异常隔离 |
+| 连接池 | `include/pool/connection_pool.h` | 连接复用、超时等待 |
+| 鉴权 | `src/service/auth_service.cpp` | PBKDF2、token |
+| 限流 | `src/redis/rate_limiter.cpp` | 滑动窗口 |
+| 分布式锁 | `src/redis/distributed_lock.cpp` | SET NX PX + Lua |
+| 消息队列 | `src/service/mq_service.cpp` | confirm、ACK、DLX |
+| 对象存储 | `src/service/storage_service.cpp` | MinIO、Multipart、直传 |
+| 任务服务 | `src/service/task_service.cpp` | 提交、查询、状态流转 |
+| 检索 | `src/service/es_service.cpp` | ES 索引与搜索 |
+| 转码 | `src/ffmpeg/ffmpeg_helper.cpp` | 分片转码、缩略图 |
+| 可观测 | `src/metrics/metrics.cpp` | Prometheus 指标 |
 
 ---
 
-## 四、依赖安装（Ubuntu 22.04）
+## 四、依赖安装
+
+Ubuntu 22.04：
 
 ```bash
-# 1. 基础编译工具
-sudo apt update && sudo apt install -y build-essential cmake git pkg-config
-
-# 2. FFmpeg 底层 C 库（转码）
-sudo apt install -y libavformat-dev libavcodec-dev libavutil-dev \
-                    libswscale-dev libswresample-dev
-
-# 3. OpenSSL / Boost / 通用库
-sudo apt install -y libssl-dev libboost-system-dev libcurl4-openssl-dev \
-                    libspdlog-dev nlohmann-json3-dev libhiredis-dev libamqpcpp-dev
+sudo apt update
+sudo apt install -y build-essential cmake git pkg-config \
+  libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
+  libssl-dev libboost-system-dev libcurl4-openssl-dev libspdlog-dev \
+  nlohmann-json3-dev libhiredis-dev libmysqlcppconn-dev libjsoncpp-dev
 ```
 
-### 源码构建的库（无官方 apt 包或需要指定版本）
-
-```bash
-# prometheus-cpp（指标）
-git clone https://github.com/jupp0r/prometheus-cpp.git && cd prometheus-cpp
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DENABLE_TESTING=OFF .
-sudo cmake --build build --target install
-
-# redis-plus-plus（Redis 客户端，依赖 hiredis 已装）
-git clone https://github.com/sewenew/redis-plus-plus.git && cd redis-plus-plus
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DREDIS_PLUS_PLUS_CXX_STANDARD=17 .
-sudo cmake --build build --target install
-
-# cpr（elasticlient 的 HTTP 依赖）
-git clone https://github.com/libcpr/cpr.git && cd cpr
-cmake -B build -DCPR_USE_SYSTEM_CURL=ON .
-sudo cmake --build build --target install
-
-# elasticlient（ES 客户端，header-only）
-git clone https://github.com/seznam/elasticlient.git && cd elasticlient
-sudo cmake --install build --prefix /usr/local
-
-# aws-cpp-sdk（MinIO S3，仅需 s3 模块以缩短编译时间）
-git clone https://github.com/aws/aws-sdk-cpp.git && cd aws-sdk-cpp
-cmake -B build -DBUILD_ONLY=s3 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON .
-sudo cmake --build build --target install
-
-# MySQL Connector/C++（或使用发行版 libmysqlcppconn-dev）
-sudo apt install -y libmysqlcppconn-dev
-```
-
-> 若某些库 `find_package` 找不到，可在 [CMakeLists.txt](CMakeLists.txt) 的「中间件客户端库」段落中
-> 手动替换为对应 `target_include_directories` + 库名（见文件内注释）。
+源码构建依赖：AMQP-CPP、redis-plus-plus、cpr、elasticlient、prometheus-cpp、AWS SDK C++。
 
 ---
 
-## 五、启动中间件（Docker）
+## 五、启动中间件
+
+Docker Compose 已包含 MySQL、Redis、RabbitMQ、MinIO、Elasticsearch、Prometheus、Grafana、Jaeger。
+
+MinIO 需要创建桶：
 
 ```bash
-docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=transcode \
-  -e MYSQL_USER=transcode -e MYSQL_PASSWORD=transcode123 -p 3306:3306 mysql:8.0
+mc alias set local http://127.0.0.1:9000 minioadmin minioadmin
+mc mb -p local/source-videos local/output-videos
+```
 
-docker run -d --name redis -p 6379:6379 redis:7
+MySQL 初始化：
 
-docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
-
-docker run -d --name minio -p 9000:9000 -p 9001:9001 \
-  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  minio/minio server /data --console-address ":9001"
-
-docker run -d --name elasticsearch -p 9200:9200 \
-  -e "discovery.type=single-node" -e "xpack.security.enabled=false" \
-  -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" elasticsearch:7.17.0
+```bash
+mysql -uroot -p < sql/create_user.sql
+mysql -uroot -p transcode < sql/init.sql
 ```
 
 ---
@@ -170,104 +237,162 @@ docker run -d --name elasticsearch -p 9200:9200 \
 ## 六、构建与运行
 
 ```bash
-# 1. 初始化数据库
-mysql -uroot -p < sql/create_user.sql
-mysql -uroot -p < sql/init.sql
-
-# 2. 构建
 cmake -B build -DCMAKE_BUILD_TYPE=Release .
 cmake --build build -j$(nproc)
 
-# 3. 启动 API 服务（默认读取 config.json）
-./build/api_server config.json &
+./build/unit_tests
 
-# 4. 启动转码 Worker（可多开模拟分布式消费）
+./build/api_server config.json &
 ./build/transcode_worker config.json &
 ```
 
-MinIO 需要预先创建桶（与 `config.json` 一致）：`source-videos`、`output-videos`。
-可在 MinIO 控制台（`http://localhost:9001`）或使用 `mc mb` 创建。
+敏感配置可用环境变量覆盖：
+
+```bash
+export TRANSCODE_MYSQL_PASSWORD=xxx
+export TRANSCODE_REDIS_PASSWORD=xxx
+export TRANSCODE_RABBITMQ_PASSWORD=xxx
+export TRANSCODE_MINIO_SECRET_KEY=xxx
+```
 
 ---
 
-## 七、HTTP 接口示例（curl）
+## 七、Web 操作台
 
-```bash
-BASE=http://localhost:8080
+浏览器访问：
 
-# 1. 健康检查
-curl $BASE/healthz
-
-# 2. 注册
-curl -X POST $BASE/api/register \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"123456"}'
-
-# 3. 登录（返回 token）
-TOKEN=$(curl -s -X POST $BASE/api/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"123456"}' | jq -r .token)
-
-# 4. 提交转码任务（multipart 上传视频；支持幂等键）
-TASK=$(curl -s -X POST $BASE/api/tasks \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -F "file=@./test.mp4" \
-  -F "resolution=1280x720" \
-  -F "bitrate=1500000" \
-  -F "video_name=my_first_video" \
-  -F "tag=travel" | jq -r .task_id)
-
-# 5. 查询任务状态
-curl -s "$BASE/api/tasks?task_id=$TASK" -H "Authorization: Bearer $TOKEN" | jq
-
-# 6. 获取产物预签名下载 URL（success 后可用）
-curl -s "$BASE/api/tasks/presign?task_id=$TASK" -H "Authorization: Bearer $TOKEN" | jq
-
-# 7. 全文检索（按名称/标签匹配）
-curl -s "$BASE/api/search?q=travel" -H "Authorization: Bearer $TOKEN" | jq
-
-# 8. Prometheus 指标
-curl $BASE/metrics
+```text
+http://localhost:8080/
 ```
 
-### 接口一览
+支持注册登录、上传视频、提交转码、进度查看、下载链接、全文检索。
+
+---
+
+## 八、HTTP 接口
 
 | 方法 | 路径 | 说明 | 鉴权 |
 | ---- | ---- | ---- | ---- |
-| GET  | `/healthz` | 健康检查 | 否 |
-| GET  | `/metrics` | Prometheus 指标 | 否 |
+| GET | `/healthz` | 健康检查 | 否 |
+| GET | `/readyz` | 依赖就绪检查 | 否 |
+| GET | `/metrics` | Prometheus 指标 | 否 |
 | POST | `/api/register` | 注册 | 否 |
-| POST | `/api/login` | 登录，返回 token | 否 |
+| POST | `/api/login` | 登录 | 否 |
 | POST | `/api/logout` | 登出 | 是 |
-| POST | `/api/tasks` | 提交转码任务（multipart） | 是 |
-| GET  | `/api/tasks?task_id=` | 查询任务状态 | 是 |
-| GET  | `/api/tasks/presign?task_id=` | 产物预签名 URL | 是 |
-| GET  | `/api/search?q=` | 全文检索 | 是 |
-
-**任务状态机**：`pending → processing → success / failed`（失败会按 `worker.max_retry` 重试，超限进入死信队列）。
-
----
-
-## 八、核心设计说明
-
-- **Reactor 模型**：`EventLoop` 统一管理两类 fd —— TCP 连接（`connections_`）与外部 fd（监听套接字、
-  `eventfd`、`timerfd`）。`HttpServer` 的解析回调将**整个请求**投递到业务线程池执行，epoll 主循环即刻回归，
-  使阻塞的 DB/MQ/S3 调用不拖累网络线程；响应在池线程内 `send + shutdown`。
-- **流式上传**：multipart 解析器对文件 part 边读边写临时文件 `/tmp/transcode_upload_<uuid>.part`，
-  处理完用 `Aws::FStream` 流式上传 MinIO，内存占用与文件大小无关。
-- **可靠消息**：交换机/队列均 durable，发布走 confirm（`future.get()` 阻塞确认），消费 `prefetch=1` +
-  手动 ACK；业务失败 `reject(no-requeue)` 落入 DLX 死信队列供排查。
-- **一致性**：任务落库用 `RAII Transaction` 包裹，异常自动回滚；转码成功后的状态更新 + 元数据写入在同一事务内完成。
-- **缓存与幂等**：任务状态查询走 Cache-Aside，状态变更即失效缓存；提交侧以 `Idempotency-Key` 保证重试不产生重复任务。
+| POST | `/api/tasks` | multipart 提交任务 | 是 |
+| POST | `/api/tasks/direct` | 直传后创建任务 | 是 |
+| GET | `/api/presign-upload` | 获取上传预签名 URL | 是 |
+| GET | `/api/tasks` | 查询任务状态 | 是 |
+| GET | `/api/tasks/presign` | 获取下载 URL | 是 |
+| GET | `/api/search` | 全文检索 | 是 |
 
 ---
 
-## 九、可配置项（config.json）
+## 九、配置说明
 
-- `server`：监听地址/端口、线程池大小、最大连接数、连接超时、最大上传字节。
-- `mysql` / `redis` / `rabbitmq` / `minio` / `elasticsearch`：各中间件连接参数。
-- `worker`：最大重试次数、默认码率、消费并发。
-- `metrics`：指标服务（`/metrics` 随 API 服务同端口暴露）。
+`config.json` 主要字段：
 
-按需修改后重启对应进程即可。
+- `server`：监听地址、端口、线程池大小
+- `mysql`：数据库连接
+- `redis`：缓存、限流、锁
+- `rabbitmq`：交换机、队列、死信队列
+- `minio`：对象存储桶
+- `elasticsearch`：检索服务
+- `worker`：重试次数、默认码率、分片数
+
+---
+
+## 十、性能总结
+
+### HTTP 层
+
+| 指标 | 结果 |
+| ---- | ---- |
+| 最佳长连接并发 | 600 |
+| 最佳长连接 QPS | 约 26186 |
+| 1000 长连接 QPS | 约 21809 |
+| 最大已测并发 | 20000，失败 0 |
+| 20000 并发 QPS | 约 3322 |
+| api_server 空闲内存 | 约 36.7MB |
+| api_server 20000 并发内存 | 约 94MB |
+
+### 
+
+### 多机部署估算
+
+| 部署 | 估算 QPS |
+| ---- | ---: |
+| 1 台 `api_server` 直连 | 约 26000 |
+| 3 台 `api_server` + Nginx | 约 60000～70000 |
+| 5 台 `api_server` + Nginx | 约 90000～120000 |
+
+### 转码层估算
+
+| 部署 | 估算吞吐 |
+| ---- | ---: |
+| 1 台机器 4 Worker | 约 1.6 任务/秒 |
+| 3 台机器，每台 4 Worker | 约 4.8 任务/秒 |
+| 5 台机器，每台 4 Worker | 约 8 任务/秒 |
+
+
+
+### 瓶颈
+
+当前主要瓶颈是 FFmpeg CPU 编解码，其次是 Worker 内存和 MinIO 带宽。HTTP 层不是瓶颈。
+
+---
+
+## 十一、测试
+
+已覆盖：
+
+- 功能：注册登录、鉴权、限流、幂等、上传、状态流转、转码、下载、检索
+- 性能：HTTP QPS、并发上传、转码吞吐、MQ 积压
+- 可靠性：死信队列、Redis 降级、分布式锁、MySQL 事务、Worker 崩溃恢复
+- 安全：越权、SQL 注入、token、文件上传
+- 单元测试：UUID、Buffer、线程池、HTTP 解析
+
+---
+
+## 十二、部署
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `deploy/k8s.yaml`
+- `deploy/nginx.conf`
+- `.github/workflows/ci.yml`
+
+### Nginx 多实例负载均衡
+
+生产环境可将多个 `api_server` 实例放在 Nginx 后面：
+
+```nginx
+upstream transcode_api {
+    server 192.168.1.10:8080;
+    server 192.168.1.11:8080;
+    server 192.168.1.12:8080;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name example.com;
+
+    ssl_certificate     /etc/nginx/certs/server.crt;
+    ssl_certificate_key /etc/nginx/certs/server.key;
+
+    location / {
+        proxy_pass http://transcode_api;
+        proxy_http_version 1.0;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+本地模拟时，可使用 `network_mode: host` 。
+
+---
+
+## 十三、当前水平
+
+当前项目是“完整可演示、可容器化、具备工业级加固雏形”的工程原型。距离生产级还差真实 K8s 集群、Redis Sentinel 接入、OpenTelemetry SDK、GPU 硬件转码和完整集成测试。

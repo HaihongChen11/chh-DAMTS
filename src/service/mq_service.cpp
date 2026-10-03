@@ -52,7 +52,7 @@ void MqService::setupTopology() {
     // 死信交换机 + 死信队列
     channel_->declareExchange(cfg_.dead_letter_exchange, AMQP::direct, AMQP::durable);
     channel_->declareQueue(cfg_.dead_letter_queue, AMQP::durable);
-    channel_->bindQueue(cfg_.dead_letter_exchange, cfg_.dead_letter_queue, cfg_.dead_letter_queue);
+    channel_->bindQueue(cfg_.dead_letter_exchange, cfg_.dead_letter_queue, cfg_.routing_key);
 
     // 主交换机
     channel_->declareExchange(cfg_.exchange, AMQP::direct, AMQP::durable);

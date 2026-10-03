@@ -54,6 +54,7 @@ int64_t EventLoop::nowMs() const {
 }
 
 void EventLoop::loop() {
+    threadId_ = std::this_thread::get_id();
     assertInLoopThread();
     looping_ = true;
     quit_ = false;

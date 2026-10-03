@@ -28,6 +28,8 @@ void signalHandler(int /*sig*/) {
 // 处理单个转码任务（在业务线程池线程中执行，可阻塞）
 void processTask(transcode::ServiceRegistry* svc, const transcode::TaskMessage& msg,
                  uint64_t deliveryTag) {
+    LOG_INFO("worker trace_id={} task_id={} retry={}",
+             msg.trace_id, msg.task_id, msg.retry_count);
     const std::string lockKey = "lock:task:" + msg.task_id;
 
     // 1. 抢占 Redis 分布式锁，防止多 Worker 重复消费同一任务
@@ -47,6 +49,7 @@ void processTask(transcode::ServiceRegistry* svc, const transcode::TaskMessage& 
 
     // 3. 状态 pending -> processing
     svc->task->markProcessing(task.task_id);
+    LOG_INFO("worker processing task_id={} trace_id={}", task.task_id, msg.trace_id);
     transcode::Metrics::instance().incInFlight();
 
     // 4. 从 MinIO 拉取源视频
@@ -61,10 +64,11 @@ void processTask(transcode::ServiceRegistry* svc, const transcode::TaskMessage& 
     transcode::MediaInfo info;
     if (ok) {
         transcode::TranscodeParams params{srcPath, outPath, task.resolution, task.bitrate};
+        params.shard_count = svc->cfg.worker().shard_count;
         params.progress = [svc, &task](int percent) {
             svc->task->updateProgress(task.task_id, percent);
         };
-        ok = transcode::transcodeVideo(params, &info, &err);
+        ok = transcode::transcodeVideoSharded(params, &info, &err);
     }
 
     // 6. 截取缩略图（best-effort，失败不影响主流程）
@@ -98,7 +102,8 @@ void processTask(transcode::ServiceRegistry* svc, const transcode::TaskMessage& 
         svc->task->incrementRetry(task.task_id);
         int retryCount = msg.retry_count + 1;
         if (retryCount < svc->cfg.worker().max_retry) {
-            transcode::TaskMessage retry{task.task_id, retryCount, msg.video_name, msg.tag};
+            transcode::TaskMessage retry{task.task_id, retryCount, msg.video_name, msg.tag,
+                                         msg.trace_id};
             svc->mq->publish(retry);   // 重新投递
             svc->mq->ack(deliveryTag); // 原始消息确认，新消息重新入队
             LOG_WARN("task {} retry {}/{}", task.task_id, retryCount, svc->cfg.worker().max_retry);

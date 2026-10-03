@@ -19,6 +19,7 @@ public:
 
     explicit MysqlPool(const Config::Mysql& cfg);
     ConnPtr acquire();
+    bool ping();
 
 private:
     std::shared_ptr<ConnectionPool<sql::Connection>> pool_;

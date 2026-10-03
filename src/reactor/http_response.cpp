@@ -9,7 +9,7 @@ namespace transcode {
 HttpResponse::HttpResponse() {
     headers_["Server"] = "transcode/1.0";
     headers_["Content-Type"] = "application/json; charset=utf-8";
-    headers_["Connection"] = "close";
+    headers_["Connection"] = "keep-alive";
 }
 
 void HttpResponse::setStatus(int code, const std::string& msg) {
@@ -107,6 +107,13 @@ HttpResponse HttpResponse::tooManyRequests(const std::string& msg) {
     HttpResponse resp;
     resp.setStatus(429, "Too Many Requests");
     resp.setBody(jsonError(429, msg));
+    return resp;
+}
+
+HttpResponse HttpResponse::serviceUnavailable(const std::string& msg) {
+    HttpResponse resp;
+    resp.setStatus(503, "Service Unavailable");
+    resp.setBody(jsonError(503, msg));
     return resp;
 }
 

@@ -18,9 +18,13 @@ public:
 
     bool ensureBucket(const std::string& bucket);
     bool uploadFile(const std::string& bucket, const std::string& key, const std::string& local_path);
+    bool uploadFileMultipart(const std::string& bucket, const std::string& key,
+                             const std::string& local_path);
     bool downloadFile(const std::string& bucket, const std::string& key, const std::string& local_path);
     // 生成预签名 URL，用于临时下载/预览
     std::string presignUrl(const std::string& bucket, const std::string& key, int64_t expire_seconds = 3600);
+    std::string presignUploadUrl(const std::string& bucket, const std::string& key,
+                                 int64_t expire_seconds = 3600);
 
 private:
     Config::Minio cfg_;

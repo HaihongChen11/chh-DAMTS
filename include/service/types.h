@@ -54,6 +54,7 @@ struct TaskMessage {
     int retry_count = 0;
     std::string video_name;
     std::string tag;
+    std::string trace_id;
 
     nlohmann::json toJson() const {
         nlohmann::json j;
@@ -61,6 +62,7 @@ struct TaskMessage {
         j["retry_count"] = retry_count;
         j["video_name"] = video_name;
         j["tag"] = tag;
+        j["trace_id"] = trace_id;
         return j;
     }
 
@@ -70,6 +72,7 @@ struct TaskMessage {
         m.retry_count = j.value("retry_count", 0);
         m.video_name = j.value("video_name", std::string());
         m.tag = j.value("tag", std::string());
+        m.trace_id = j.value("trace_id", std::string());
         return m;
     }
 };

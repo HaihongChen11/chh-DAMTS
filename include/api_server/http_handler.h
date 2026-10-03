@@ -11,6 +11,7 @@ void registerRoutes(Router* router, ServiceRegistry* svc);
 
 // 构造 HttpServer 的回调：把解析完成的请求投递到业务线程池后分发。
 // 保证 epoll 主循环不执行任何阻塞 / CPU 密集业务。
-HttpServer::HttpCallback makeHttpCallback(Router* router, ServiceRegistry* svc);
+HttpServer::HttpCallback makeHttpCallback(Router* router, ServiceRegistry* svc,
+                                          HttpServer* server);
 
 } // namespace transcode

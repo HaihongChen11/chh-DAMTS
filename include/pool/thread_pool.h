@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstddef>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -20,7 +21,8 @@ class ThreadPool : Noncopyable {
 public:
     using Task = std::function<void()>;
 
-    explicit ThreadPool(size_t threads) : workers_(threads) {}
+    explicit ThreadPool(size_t threads, size_t maxQueueSize = 10000)
+        : workers_(threads), maxQueueSize_(maxQueueSize == 0 ? 10000 : maxQueueSize) {}
     ~ThreadPool() { stop(); }
 
     void start();
@@ -41,12 +43,21 @@ public:
 
     // 提交不关心结果的普通任务
     void enqueue(Task t);
+    // 尝试入队，队列满或已停止时返回 false（供 Reactor 等不能阻塞的线程使用）
+    bool tryEnqueue(Task t);
+
+    size_t queueSize() {
+        std::lock_guard<std::mutex> lk(mutex_);
+        return tasks_.size();
+    }
 
 private:
     std::vector<std::thread> workers_;
     std::queue<Task> tasks_;
+    size_t maxQueueSize_;
     std::mutex mutex_;
     std::condition_variable cv_;
+    std::condition_variable cvFull_;
     bool stop_ = false;
 };
 

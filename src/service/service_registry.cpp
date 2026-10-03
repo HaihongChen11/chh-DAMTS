@@ -29,8 +29,13 @@ bool ServiceRegistry::init(const Config& cfg) {
     mysql = std::make_shared<MysqlPool>(cfg.mysql());
 
     // 业务线程池
-    threadPool = std::make_shared<ThreadPool>(cfg.server().thread_pool_size);
+    size_t poolSize = cfg.server().thread_pool_size;
+    size_t uploadSize = std::max<size_t>(2, poolSize / 2);
+    size_t generalSize = std::max<size_t>(2, poolSize - uploadSize);
+    threadPool = std::make_shared<ThreadPool>(generalSize);
     threadPool->start();
+    uploadPool = std::make_shared<ThreadPool>(uploadSize);
+    uploadPool->start();
 
     // MinIO 对象存储
     storage = std::make_shared<StorageService>(cfg.minio());
@@ -63,6 +68,7 @@ bool ServiceRegistry::init(const Config& cfg) {
 void ServiceRegistry::shutdown() {
     if (mq) mq->stop();
     if (threadPool) threadPool->stop();
+    if (uploadPool) uploadPool->stop();
 }
 
 } // namespace transcode

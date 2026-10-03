@@ -1,0 +1,18 @@
+groups:
+  - name: transcode-alerts
+    rules:
+      - alert: TranscodeTaskFailedRateHigh
+        expr: rate(transcode_tasks_failed_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "转码任务失败率过高"
+
+      - alert: TranscodeQueueBuildingUp
+        expr: transcode_tasks_inflight > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "转码在途任务数过高"

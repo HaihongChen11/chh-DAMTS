@@ -1,0 +1,101 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: transcode
+      MYSQL_USER: transcode
+      MYSQL_PASSWORD: transcode123
+    ports:
+      - "3306:3306"
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  redis-sentinel:
+    image: redis:7
+    command: redis-server /etc/redis/sentinel.conf --sentinel
+    volumes:
+      - ./deploy/redis-sentinel.conf:/etc/redis/sentinel.conf
+    ports:
+      - "26379:26379"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  elasticsearch:
+    image: elasticsearch:7.17.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+
+  api_server:
+    build: .
+    command: ["./build/api_server", "config.json"]
+    depends_on:
+      - mysql
+      - redis
+      - rabbitmq
+      - minio
+      - elasticsearch
+    ports:
+      - "8080:8080"
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./deploy/alert.rules.yml:/etc/prometheus/alert.rules.yml
+    ports:
+      - "9090:9090"
+
+  alertmanager:
+    image: prom/alertmanager
+    ports:
+      - "9093:9093"
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    volumes:
+      - ./deploy/opentelemetry-collector.yml:/etc/otelcol/config.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+
+  worker:
+    build: .
+    command: ["./build/transcode_worker", "config.json"]
+    depends_on:
+      - api_server

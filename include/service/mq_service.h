@@ -34,6 +34,7 @@ public:
     ~MqService();
 
     bool connect();
+    bool isConnected() const { return connected_; }
     void stop();
 
     // 发布任务消息（生产者 confirm，阻塞等待确认结果）
