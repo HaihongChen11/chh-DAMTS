@@ -16,6 +16,8 @@ jobs:
             libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
             libssl-dev libboost-system-dev libcurl4-openssl-dev libspdlog-dev \
             nlohmann-json3-dev libhiredis-dev libmysqlcppconn-dev
+      - name: Build source dependencies
+        run: bash scripts/install_deps.sh
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release .
       - name: Build
