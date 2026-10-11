@@ -6,12 +6,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git pkg-config ca-certificates curl \
     libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
     libssl-dev libboost-system-dev libcurl4-openssl-dev libspdlog-dev \
-    nlohmann-json3-dev libhiredis-dev libmysqlcppconn-dev libjsoncpp-dev \
+    nlohmann-json3-dev libhiredis-dev libmysqlcppconn-dev libjsoncpp-dev liburing-dev \
     libcivetweb-dev civetweb zlib1g-dev && \
     rm -rf /var/lib/apt/lists/*
-
-# 使用 gitclone 镜像加速 GitHub 源码下载
-RUN git config --global url."https://gitclone.com/github.com/".insteadOf "https://github.com/"
 
 WORKDIR /opt/third_party_src
 

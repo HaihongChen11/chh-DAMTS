@@ -48,7 +48,9 @@ services:
       - "9200:9200"
 
   api_server:
-    build: .
+    build:
+      context: .
+      network: host
     command: ["./build/api_server", "config.json"]
     depends_on:
       - mysql
@@ -95,7 +97,9 @@ services:
       - "4318:4318"
 
   worker:
-    build: .
+    build:
+      context: .
+      network: host
     command: ["./build/transcode_worker", "config.json"]
     depends_on:
       - api_server
