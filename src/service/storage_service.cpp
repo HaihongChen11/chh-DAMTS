@@ -91,6 +91,7 @@ bool StorageService::uploadFile(const std::string& bucket, const std::string& ke
     request.SetBucket(bucket);
     request.SetKey(key);
     request.SetContentType(contentTypeForKey(key));
+    request.SetContentDisposition("attachment");
 
     // 流式上传：用文件流作为 body，不把整个文件读入内存
     auto body = Aws::MakeShared<Aws::FStream>("PutObject", local_path.c_str(),
@@ -123,6 +124,7 @@ bool StorageService::uploadFileMultipart(const std::string& bucket,
     create.SetBucket(bucket);
     create.SetKey(key);
     create.SetContentType(contentTypeForKey(key));
+    create.SetContentDisposition("attachment");
     auto createOutcome = client_->CreateMultipartUpload(create);
     if (!createOutcome.IsSuccess()) {
         LOG_ERROR("create multipart upload failed: {}",
