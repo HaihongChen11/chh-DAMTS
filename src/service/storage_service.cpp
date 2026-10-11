@@ -1,5 +1,6 @@
 #include "service/storage_service.h"
 
+#include <cctype>
 #include <fstream>
 #include <sys/stat.h>
 
@@ -25,6 +26,25 @@ std::string stripScheme(const std::string& url) {
     if (url.rfind("http://", 0) == 0) return url.substr(7);
     if (url.rfind("https://", 0) == 0) return url.substr(8);
     return url;
+}
+
+std::string contentTypeForKey(const std::string& key) {
+    const auto dot = key.rfind('.');
+    std::string ext = dot == std::string::npos ? "" : key.substr(dot + 1);
+    for (char& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+    if (ext == "mp4" || ext == "m4v") return "video/mp4";
+    if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+    if (ext == "png") return "image/png";
+    if (ext == "webp") return "image/webp";
+    if (ext == "gif") return "image/gif";
+    if (ext == "m3u8") return "application/vnd.apple.mpegurl";
+    if (ext == "ts") return "video/mp2t";
+    if (ext == "webm") return "video/webm";
+    if (ext == "mkv") return "video/x-matroska";
+    if (ext == "avi") return "video/x-msvideo";
+    if (ext == "mov") return "video/quicktime";
+    if (ext == "mp3") return "audio/mpeg";
+    return "application/octet-stream";
 }
 } // namespace
 
@@ -70,6 +90,7 @@ bool StorageService::uploadFile(const std::string& bucket, const std::string& ke
     Aws::S3::Model::PutObjectRequest request;
     request.SetBucket(bucket);
     request.SetKey(key);
+    request.SetContentType(contentTypeForKey(key));
 
     // 流式上传：用文件流作为 body，不把整个文件读入内存
     auto body = Aws::MakeShared<Aws::FStream>("PutObject", local_path.c_str(),
@@ -101,6 +122,7 @@ bool StorageService::uploadFileMultipart(const std::string& bucket,
     Aws::S3::Model::CreateMultipartUploadRequest create;
     create.SetBucket(bucket);
     create.SetKey(key);
+    create.SetContentType(contentTypeForKey(key));
     auto createOutcome = client_->CreateMultipartUpload(create);
     if (!createOutcome.IsSuccess()) {
         LOG_ERROR("create multipart upload failed: {}",
