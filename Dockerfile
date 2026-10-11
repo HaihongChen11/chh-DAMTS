@@ -45,9 +45,18 @@ RUN git clone --depth 1 https://github.com/jupp0r/prometheus-cpp.git && \
     cmake -B build -DBUILD_SHARED_LIBS=ON -DENABLE_TESTING=OFF . && \
     cmake --build build -j"$(nproc)" && cmake --install build
 
+# 大仓库（AWS SDK）走 HTTP/1.1，避免 HTTP/2 流被切断导致 fetch-pack 失败
+RUN git config --global http.version HTTP/1.1 && \
+    git config --global http.postBuffer 524288000
+
 # AWS SDK C++（仅 S3，使用系统 OpenSSL，关闭 s2n 以缩短构建时间）
-RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
-      https://github.com/aws/aws-sdk-cpp.git && \
+RUN set -e; \
+    for i in 1 2 3; do \
+      if git clone --depth 1 --recurse-submodules --shallow-submodules \
+        https://github.com/aws/aws-sdk-cpp.git; then break; fi; \
+      echo "aws-sdk-cpp clone attempt $i failed, retrying..."; sleep 5; \
+    done; \
+    test -d aws-sdk-cpp/.git && \
     cd aws-sdk-cpp && \
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY=s3 \
       -DBUILD_SHARED_LIBS=ON -DENABLE_TESTING=OFF \
